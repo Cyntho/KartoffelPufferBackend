@@ -1,9 +1,11 @@
 package org.cyntho.fh.database
 
 import java.sql.Connection
+import java.sql.Date
 import java.sql.DriverManager
 import java.sql.PreparedStatement
 import java.sql.ResultSet
+import java.sql.Timestamp
 
 class DbConnector(private val host: String,
                   private val port: Int,
@@ -18,6 +20,7 @@ class DbConnector(private val host: String,
         try {
             Class.forName("com.mysql.jdbc.Driver")
             connection = DriverManager.getConnection(getConnectionString(), user, pass)
+            println("Database connection established.")
         } catch (ex: ClassNotFoundException){
             println("Could not find driver: ${ex.message}")
         }
@@ -44,7 +47,6 @@ class DbConnector(private val host: String,
     public fun executeUpdate(qry: String, args: Array<Any>): Int {
         try {
             val stmt: PreparedStatement = prepare(qry, args)
-            println("prepared: $stmt")
 
             return stmt.executeUpdate()
         } catch (any: java.lang.Exception){
@@ -55,8 +57,6 @@ class DbConnector(private val host: String,
 
     private fun prepare(qry: String, args: Array<Any>): PreparedStatement {
         val stmt: PreparedStatement = connection.prepareStatement(qry)
-
-        println("Preparing: $args")
 
         var i = 1
         for (a: Any in args){
@@ -79,6 +79,12 @@ class DbConnector(private val host: String,
                 }
                 is Double -> {
                     stmt.setDouble(i, a)
+                }
+                is Date -> {
+                    stmt.setDate(i, a)
+                }
+                is Timestamp -> {
+                    stmt.setTimestamp(i, a)
                 }
                 else -> {
                     println("DbConnector.executeQuery() --> Undefined object type for: $a")

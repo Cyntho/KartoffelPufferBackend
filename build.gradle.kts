@@ -30,6 +30,8 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:$logback_version")
     implementation("com.google.code.gson:gson:2.9.0")
     implementation("org.jetbrains.kotlin:kotlin-jdbc:0.12.213")
+    implementation("io.ktor:ktor-server-double-receive:$ktor_version")
+    implementation(files("lib/mysql-connector-java-5.1.44-bin.jar"))
     testImplementation("io.ktor:ktor-server-tests-jvm:$ktor_version")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:$kotlin_version")
 }

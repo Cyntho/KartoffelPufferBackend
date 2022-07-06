@@ -4,7 +4,6 @@ import com.google.gson.GsonBuilder
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.application.*
-import io.ktor.server.engine.*
 import io.ktor.server.http.content.*
 import io.ktor.server.response.*
 import io.ktor.server.request.*
@@ -30,6 +29,26 @@ fun Application.configureSerialization() {
     fun authUserAsGuestOrAdmin(token: String): Boolean{
         val rs = db.executeQuery("SELECT COUNT(*) as total FROM users WHERE token = ?", arrayOf(token))
         return (rs != null && rs.next() && rs.getInt("total") == 1)
+    }
+
+    fun getUserID(token: String): Int {
+        val rs = db.executeQuery("SELECT id FROM users WHERE token = ?", arrayOf(token))
+        if (rs != null && rs.next()){
+            return rs.getInt("id")
+        }
+        return -1
+    }
+
+    fun getLayoutIdFor(time: Timestamp): Int {
+
+        val rs = db.executeQuery("SELECT * FROM layouts WHERE active = ? " +
+                "AND validFrom <= ? ORDER BY validFROM DESC",
+                arrayOf(
+                    true,
+                    time
+                ))
+
+        return -1
     }
 
     routing {
@@ -188,12 +207,12 @@ fun Application.configureSerialization() {
                 val rs = db.executeQuery("SELECT * FROM reservations WHERE layout = ? AND appointment_end > ?",
                 arrayOf(body.type, Timestamp(body.data.toLong())))
 
-                val reservations = mutableListOf<ReservationWrapper>()
+                val reservations = mutableListOf<ReservationHolder>()
                 var counter = 0
 
                 if (rs != null){
                     while (rs.next()){
-                        reservations.add(counter++, ReservationWrapper(
+                        reservations.add(counter++, ReservationHolder(
                             rs.getInt("id"),
                             rs.getInt("layout"),
                             rs.getInt("pos_x"),
@@ -299,16 +318,6 @@ fun Application.configureSerialization() {
 
             body.type = 0
             call.respond(body)
-        }
-
-        post("/getDishes"){
-            try {
-                val body = call.receive<NetPack>()
-
-
-            } catch (ex: ContentTransformationException){
-                println("Received invalid packet at '/getDishes'")
-            }
         }
 
         post("/getAllergyList"){
@@ -417,6 +426,115 @@ fun Application.configureSerialization() {
 
             } catch (ex: ContentTransformationException){
                 println("Received invalid packet at '/getDishes'")
+            }
+        }
+
+        post("/attemptReservation"){
+            try {
+                val body = call.receive<NetPack>()
+                println("Received: $body")
+                body.type = 1
+
+                if (!authUserAsGuestOrAdmin(body.userToken)){
+                    body.type = -1
+                    println("Received unauthorized request at '/attempReservation'")
+                    return@post
+                }
+
+                val wrapper = GsonBuilder().create().fromJson(body.data, ReservationWrapper::class.java)
+                if (wrapper == null){
+                    println("wrapper was null for reservationHolder")
+                } else {
+
+                    println("dbg: Wrapper valid")
+
+                    // 'duration' of requested reservation
+                    // Assign 35 minutes per person
+                    // ToDo: dont scale linear...
+                    val duration = wrapper.pplCurrent.coerceAtMost(wrapper.pplMax) * 35
+                    val endpoint = Timestamp((wrapper.time.time) + (1000 * 60 * duration))
+
+                    println("Duration: $duration")
+
+
+                    // Double check current reservations
+                    val reservationsRS = db.executeQuery("SELECT COUNT(*) as total FROM reservations " +
+                            "WHERE layout = ? " +
+                            "AND pos_x = ? " +
+                            "AND pos_y = ? " +
+                            "AND appointment_start > ? " +
+                            "AND appointment_end < ?",
+
+                        arrayOf(
+                            wrapper.layout,
+                            wrapper.x,
+                            wrapper.y,
+                            wrapper.time,
+                            endpoint
+                        ))
+                    if (reservationsRS != null && reservationsRS.next() && reservationsRS.getInt("total") > 0){
+                        println("There where already ${reservationsRS.getInt("total")} reservations at that point.")
+                        body.type = -1
+                    } else {
+
+                        println("dbg: There are no concurrent reservatons!")
+
+
+                        // Need to cache current creation time, because 'INSERT' statements only return the number of rows inserted, not an id
+                        val timeRef = Timestamp(System.currentTimeMillis())
+                        val update = db.executeUpdate("INSERT INTO reservations (layout, pos_x, pos_y, user, created, appointment_start, appointment_end, people) " +
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        arrayOf(
+                            wrapper.layout,
+                            wrapper.x,
+                            wrapper.y,
+                            getUserID(body.userToken),
+                            timeRef,
+                            wrapper.time,
+                            endpoint,
+                            wrapper.pplMax
+                        ))
+
+                        if (update == 1){
+
+                            val reference = db.executeQuery("SELECT * FROM reservations WHERE created = ?", arrayOf(timeRef))
+                            var reservationID = 0
+                            if (reference != null && reference.next()){
+                                reservationID = reference.getInt("id")
+                            }
+
+                            // Also add reservation dishes.
+                            if (wrapper.dishes != null){
+                                for (entry in wrapper.dishes!!.entries){
+
+                                    val inserter = db.executeUpdate("INSERT INTO reservation_dishes (reservation, dish, amount) VALUES (?, ?, ?)",
+                                    arrayOf(
+                                        reservationID,
+                                        entry.key,
+                                        entry.value
+                                    ))
+
+                                    if (inserter == 0){
+                                        println("Couldnt assign dish [${entry.key}], amount [${entry.value}] to reservation [$reservationID]")
+                                    }
+                                }
+                            }
+                            body.type = 0
+                            body.data = (endpoint.time).toString()
+                            call.respond(body)
+
+                        } else {
+                            println("Something went wrong?")
+                            body.type = -1
+                        }
+                    }
+                }
+
+
+                println("Response: $body")
+                call.respond(body)
+            } catch (ex: ContentTransformationException){
+                println("Received invalid packet at '/attemptReservation'")
             }
         }
     }

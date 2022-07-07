@@ -757,6 +757,7 @@ fun Application.configureSerialization() {
                         mutableMapOf()
                     )
 
+
                     // Check if this reservation belongs to the querying user
                     val resID = query.getInt("user")
                     if (resID != userID && !isAdmin){
@@ -766,11 +767,8 @@ fun Application.configureSerialization() {
                         return@post
                     }
 
-                    println(wrapper.time)
-
-                    val dishQuery = db.executeQuery("SELECT * FROM reservation_dishes WHERE id = ?", arrayOf(query.getInt("id")))
+                    val dishQuery = db.executeQuery("SELECT * FROM reservation_dishes WHERE reservation = ?", arrayOf(query.getInt("id")))
                     if (dishQuery != null){
-
                         while (dishQuery.next()){
                             wrapper.dishes!![dishQuery.getInt("dish")] = dishQuery.getInt("amount")
                         }

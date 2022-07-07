@@ -206,8 +206,16 @@ fun Application.configureSerialization() {
         post("/getCurrentLayout"){
             try {
                 val body = call.receive<NetPack>()
+
+                var desiredTime: Timestamp? = null
+                if (body.data == ""){
+                    desiredTime = Timestamp(System.currentTimeMillis())
+                } else {
+                    desiredTime = GsonBuilder().create().fromJson(body.data, Timestamp::class.java)
+                }
+
                 val layoutRS = db.executeQuery("SELECT * FROM layouts WHERE active = ? AND validFrom < ? ORDER BY validFrom DESC",
-                    arrayOf(true, Timestamp(System.currentTimeMillis())))
+                    arrayOf(true, desiredTime!!))
 
                 if (layoutRS != null){
                     if (layoutRS.next()){
@@ -284,81 +292,70 @@ fun Application.configureSerialization() {
             try {
                 val gson    = GsonBuilder().create()
                 val wrapper = gson.fromJson(body.data, LayoutWrapper::class.java)
+                body.type = 1
 
-                val arr = wrapper.asArray2D()
-                arr?.prettyPrint()
+                if (!authUserAsAdmin(body.userToken)){
+                    body.type = -1
+                    body.data = "Unauthorized request"
+                    println("Received unauthorized request at '/updateLayout' from user [${body.userToken}]")
+                    call.respond(body)
+                    return@post
+                }
 
-                val authReq = db.executeQuery("SELECT COUNT(*) as total FROM users WHERE token = ? AND isAdmin = ?", arrayOf(body.userToken, true))
-
-                if (authReq != null && authReq.next()){
-
-                    // User is not authorized to do this
-                    if (authReq.getInt("total") == 0){
-                        body.type = 0
-                        body.data = "ERR_AUTH"
-                        call.respond(body)
-                        println("Unauthorized call to /updateLayout")
-                        return@post
-                    }
-
-                    val fetchReq = db.executeQuery("SELECT COUNT(*) as total FROM layouts WHERE id = ?", arrayOf(wrapper.id))
-
-                    // Layout exists already, needs to be updated
-                    var hasNext = false
-                    var counter = -1
-                    if (fetchReq != null){
-                        hasNext = fetchReq.next()
-                        counter = fetchReq.getInt("total")
-                    }
-
-                    if (fetchReq != null && hasNext && counter == 1){
-
-                        val update = db.executeUpdate("UPDATE layouts SET " +
+                // Layout exists already, needs to be updated
+                if (wrapper.id != -1){
+                    val update = db.executeUpdate(
+                        "UPDATE layouts SET " +
                                 "size_x = ?, " +
                                 "size_y = ?, " +
                                 "data = ?, " +
                                 "name = ?, " +
-                                "created = ?, " +
                                 "validFrom = ?, " +
                                 "active = ? WHERE id = ?",
 
                         arrayOf(
                             wrapper.sizeX,
                             wrapper.sizeY,
-                            //Json.encodeToJsonElement(wrapper.data.arrayContents).toString(),
-                            //GsonBuilder().create().fromJson(wrapper.data, Array2D::class.java),
                             wrapper.data.toString(),
                             wrapper.name,
-                            Timestamp(wrapper.created),
                             Timestamp(wrapper.validFrom),
                             wrapper.active,
-                            wrapper.id))
+                            wrapper.id
+                        )
+                    )
 
-                        if (update == 1){
-                            println("User [${body.userToken}] updated layout '${wrapper.name}' [id: ${wrapper.id}]")
-                            body.data = "ERR_SUCCESS"
-                        }
-                    } else {
-                        val insert = db.executeUpdate("INSERT INTO layouts (size_x, size_y, data, name, created, validFrom, active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    if (update == 1) {
+                        println("User [${body.userToken}] updated layout '${wrapper.name}' [id: ${wrapper.id}]")
+                        body.data = "ERR_SUCCESS"
+                        body.type = 0
+                    }
+                } else {
+                // Layout is new!
+                    val inserter = db.executeUpdate("INSERT INTO layouts (size_x, size_y, data, name, created, validFrom, active) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         arrayOf(
                             wrapper.sizeX,
                             wrapper.sizeY,
                             wrapper.data.toString(),
                             wrapper.name,
-                            Timestamp(wrapper.created),
+                            Timestamp(System.currentTimeMillis()),
                             Timestamp(wrapper.validFrom),
                             wrapper.active
-                        ))
-                        println("User [${body.userToken}] created layout '${wrapper.name}' [id: ${wrapper.id}]")
+                        )
+                    )
+
+                    if (inserter > 0){
+                        body.data = "ERR_SUCCESS"
+                        body.type = 0
+                        println("User [${body.userToken}] created new Layout '${wrapper.name}'!")
                     }
                 }
 
+                call.respond(body)
+                println("Response: $body")
             } catch (any: java.lang.Exception){
                 any.printStackTrace()
             }
 
-            body.type = 0
-            call.respond(body)
         }
 
         post("/getAllergyList"){
@@ -728,6 +725,53 @@ fun Application.configureSerialization() {
             }
         }
 
+        post("/getAllLayouts"){
+
+            try {
+                val body = call.receive<NetPack>()
+                println("Received: $body")
+                if (!authUserAsAdmin(body.userToken)){
+                    println("Received unauthorized request at '/getAllLayouts'")
+                    body.type = -1
+                    body.data = ""
+                    call.respond(body)
+                    return@post
+                }
+
+                val rs = db.executeQuery("SELECT * FROM layouts ORDER BY validFrom DESC", arrayOf())
+                if (rs == null){
+                    body.type = 1
+                    body.data = "Database returns null"
+                    call.respond(body)
+                    return@post
+                }
+
+                val list: MutableList<LayoutWrapper> = mutableListOf()
+                while (rs.next()){
+
+                    val wrapper = LayoutWrapper(
+                        rs.getInt("id"),
+                        rs.getInt("size_x"),
+                        rs.getInt("size_y"),
+                        rs.getString("name"),
+                        rs.getTimestamp("created").time,
+                        rs.getTimestamp("validFrom").time,
+                        rs.getBoolean("active"),
+                        mutableListOf())
+                    wrapper.fillFromString(rs.getString("data"))
+
+                    list.add(list.size, wrapper)
+                }
+
+                body.data = GsonBuilder().create().toJson(list)
+                body.type = 0
+                call.respond(body)
+                println("Response: $body")
+
+            } catch (ex: ContentTransformationException){
+                println("Received invalid packet at '/getAllLayouts'")
+            }
+        }
 
         post("/getReservationDetails"){
             try {

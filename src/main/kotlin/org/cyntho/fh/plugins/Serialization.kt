@@ -206,11 +206,21 @@ fun Application.configureSerialization() {
         post("/getCurrentLayout"){
             try {
                 val body = call.receive<NetPack>()
+
+                var desiredTime: Timestamp? = null
+                if (body.data == ""){
+                    desiredTime = Timestamp(System.currentTimeMillis())
+                } else {
+                    desiredTime = GsonBuilder().create().fromJson(body.data, Timestamp::class.java)
+                }
+
                 val layoutRS = db.executeQuery("SELECT * FROM layouts WHERE active = ? AND validFrom < ? ORDER BY validFrom DESC",
-                    arrayOf(true, Timestamp(System.currentTimeMillis())))
+                    arrayOf(true, desiredTime!!))
 
                 if (layoutRS != null){
                     if (layoutRS.next()){
+
+
 
                         var raw = layoutRS.getString("data")
 
@@ -357,6 +367,10 @@ fun Application.configureSerialization() {
 
             body.type = 0
             call.respond(body)
+        }
+
+        post("/deleteLayout"){
+
         }
 
         post("/setUsername") {

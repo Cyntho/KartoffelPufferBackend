@@ -11,8 +11,11 @@ import io.ktor.server.routing.*
 import org.cyntho.fh.database.DbConnector
 import org.cyntho.fh.models.*
 import java.io.File
+import java.sql.ResultSet
 import java.sql.SQLException
 import java.sql.Timestamp
+import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -31,12 +34,27 @@ fun Application.configureSerialization() {
         return (rs != null && rs.next() && rs.getInt("total") == 1)
     }
 
+    fun authUserAsAdmin(token: String): Boolean{
+        val rs = db.executeQuery("SELECT COUNT(*) as total FROM users WHERE token = ? AND isAdmin = ?", arrayOf(token, true))
+        return (rs != null && rs.next() && rs.getInt("total") == 1)
+    }
+
     fun getUserID(token: String): Int {
         val rs = db.executeQuery("SELECT id FROM users WHERE token = ?", arrayOf(token))
         if (rs != null && rs.next()){
             return rs.getInt("id")
         }
         return -1
+    }
+
+    fun isSameDay(first: Date, second: Date): Boolean {
+        val sf = SimpleDateFormat("yyyyMMdd")
+
+        val retVal = sf.format(first).equals(sf.format(second))
+
+        println("[${sf.format(first)}].equals(${sf.format(second)}) ==> $retVal")
+
+        return retVal
     }
 
     fun getLayoutIdFor(time: Timestamp): Int {
@@ -68,6 +86,29 @@ fun Application.configureSerialization() {
             println("Routing allergies..")
         }
 
+        get("/test"){
+            val now = System.currentTimeMillis()
+            val ts = Timestamp(now)
+
+            val heute = SimpleDateFormat("yyyy-mm-dd").format(ts)
+
+            val endeDesTages = Timestamp.valueOf("$heute 23:59:59")
+
+            println("heute is: $endeDesTages")
+
+        }
+
+        post("/getImprint"){
+            try {
+                val body = call.receive<NetPack>()
+                val imprintData = File("data/imprint.txt").readLines()
+
+                body.data = imprintData.toString()
+                call.respond(body)
+            } catch (ex: ContentTransformationException){
+                println("Received invalid packet at '/getImprint'")
+            }
+        }
 
         post("/register"){
             val body = call.receive<NetPack>()
@@ -90,7 +131,7 @@ fun Application.configureSerialization() {
 
                             // Not registered yet, do it now
                             body.userToken = UUID.randomUUID().toString()
-                            db.executeUpdate("INSERT INTO users (token, advertiser) VALUES (?, ?)", arrayOf(body.userToken, body.data))
+                            db.executeUpdate("INSERT INTO users (token, advertiser, username) VALUES (?, ?, ?)", arrayOf(body.userToken, body.data, "Unknown Guest"))
                         } else {
 
                             // Already in there. return token
@@ -452,7 +493,7 @@ fun Application.configureSerialization() {
                     // Assign 35 minutes per person
                     // ToDo: dont scale linear...
                     val duration = wrapper.pplCurrent.coerceAtMost(wrapper.pplMax) * 35
-                    val endpoint = Timestamp((wrapper.time.time) + (1000 * 60 * duration))
+                    val endpoint = Timestamp((wrapper.time) + (1000 * 60 * duration))
 
                     println("Duration: $duration")
 
@@ -490,7 +531,7 @@ fun Application.configureSerialization() {
                             wrapper.y,
                             getUserID(body.userToken),
                             timeRef,
-                            wrapper.time,
+                            Timestamp(wrapper.time),
                             endpoint,
                             wrapper.pplMax
                         ))
@@ -537,5 +578,218 @@ fun Application.configureSerialization() {
                 println("Received invalid packet at '/attemptReservation'")
             }
         }
+
+        post("/deleteReservation"){
+            // body.type == reservationID
+            try {
+                val body = call.receive<NetPack>()
+                println("Received: $body")
+                // ToDo: Limit deletion to x minutes before appointment!
+
+                val userID = getUserID(body.userToken)
+                val isAdmin = authUserAsAdmin(body.userToken)
+
+                if (userID == -1){
+                    body.type = -1
+                    body.data = "Unauthorized request"
+                    call.respond(body)
+                    return@post
+                }
+
+                val selectQuery = db.executeQuery("SELECT * FROM reservations WHERE id = ?", arrayOf(body.type))
+                if (selectQuery != null && selectQuery.next()){
+                    if (selectQuery.getInt("user") == userID || isAdmin){
+
+                        val deleteQry = db.executeUpdate("DELETE FROM reservations WHERE id = ?", arrayOf(body.type))
+                        if (deleteQry == 1){
+                            body.data = "Deletion successful - Removed reservation with id ${body.type}}"
+                            body.type = 0
+                        }
+
+                    } else {
+                        body.type = -1
+                        body.data = "Unauthorized request"
+                    }
+                }
+
+                call.respond(body)
+                println("Response: $body")
+            } catch (ex: Exception){
+                println("Received invalid packet at '/deleteReservation'")
+            }
+        }
+
+        post("/listReservations"){
+            try {
+                val body = call.receive<NetPack>()
+                println("Received: $body")
+
+                val userID = getUserID(body.userToken)
+                val isAdmin = authUserAsAdmin(body.userToken)
+                var loadAsAdmin = body.type
+
+                if (userID == -1){
+                    println("Unauthorized request at '/listReservations'")
+                    body.type = -1
+                    call.respond(body)
+                    return@post
+                }
+
+                if (loadAsAdmin == 1 && !isAdmin){
+                    loadAsAdmin = 0
+                }
+
+
+                var day: Timestamp? = null
+
+                try {
+                    day = GsonBuilder().create().fromJson(body.data, Timestamp::class.java)
+                } catch (ex: Exception){
+                    println("Invalid Timestamp provided: $ex")
+                    body.type = -1
+                    call.respond(body)
+                    return@post
+                }
+
+                //day = Timestamp(day!!.time - (30 * 1000 * 60))
+
+                val gregorian = GregorianCalendar()
+                gregorian.time = day
+                val anfangDesTages = day.time - (60 * 30)
+
+                // Differentiate between admin and guest
+                var query: ResultSet? = null
+                if (loadAsAdmin == 0){
+                    // --> GUEST
+                    query = db.executeQuery("SELECT " +
+                            "reservations.id, " +
+                            "reservations.layout, " +
+                            "reservations.appointment_start, " +
+                            "reservations.appointment_end, " +
+                            "reservations.people, " +
+                            "users.username " +
+                            "FROM " +
+                            "reservations " +
+                            "JOIN " +
+                            "users " +
+                            "ON  " +
+                            "reservations.user = users.id " +
+                            "WHERE " +
+                            "reservations.appointment_start >= ? " +
+                            "AND " +
+                            "reservations.user = ? ORDER BY reservations.appointment_start ASC",
+                        arrayOf(anfangDesTages, userID))
+                } else {
+                    // --> ADMIN
+                    query = db.executeQuery("SELECT " +
+                            "reservations.id, " +
+                            "reservations.layout, " +
+                            "reservations.appointment_start, " +
+                            "reservations.appointment_end, " +
+                            "reservations.people, " +
+                            "users.username " +
+                            "FROM " +
+                            "reservations " +
+                            "JOIN " +
+                            "users " +
+                            "ON  " +
+                            "reservations.user = users.id " +
+                            "ORDER BY reservations.appointment_start ASC",
+                        arrayOf())
+
+                }
+
+                val list = mutableListOf<ReservationListEntry>()
+                if (query != null){
+                    while (query.next()){
+
+                        if ((loadAsAdmin == 1 && isSameDay(Date(day.time), Date(query.getTimestamp("appointment_start").time))) || loadAsAdmin == 0){
+                            println("Is on same day: ${query.getInt("id")}")
+
+                            list.add(list.size, ReservationListEntry(
+                                query.getInt("id"),
+                                query.getInt("layout"),
+                                query.getTimestamp("appointment_start").time,
+                                query.getTimestamp("appointment_end").time,
+                                query.getString("username"),
+                                query.getInt("people")
+                            ))
+                        }
+                    }
+                }
+
+                body.data = GsonBuilder().create().toJson(list)
+                body.type = 0
+
+                println("Response: $body")
+                call.respond(body)
+            } catch (ex: ContentTransformationException){
+                ex.printStackTrace()
+            }
+        }
+
+
+        post("/getReservationDetails"){
+            try {
+                val body = call.receive<NetPack>()
+
+                println("Received: $body")
+
+                val userID = getUserID(body.userToken)
+                val isAdmin = authUserAsAdmin(body.userToken)
+
+                if (userID == -1){
+                    body.type = -1
+                    call.respond(body)
+                    return@post
+                }
+
+                val query = db.executeQuery("SELECT * FROM reservations WHERE id = ?", arrayOf(body.type))
+
+                if (query != null && query.next()){
+                    val wrapper = ReservationWrapper(
+                        query.getInt("layout"),
+                        query.getInt("pos_x"),
+                        query.getInt("pos_y"),
+                        query.getTimestamp("appointment_start").time,
+                        query.getInt("people"),
+                        query.getInt("people"),
+                        mutableMapOf()
+                    )
+
+                    // Check if this reservation belongs to the querying user
+                    val resID = query.getInt("user")
+                    if (resID != userID && !isAdmin){
+                        body.type = -1
+                        body.data = "This doesnt belong to you!"
+                        call.respond(body)
+                        return@post
+                    }
+
+                    println(wrapper.time)
+
+                    val dishQuery = db.executeQuery("SELECT * FROM reservation_dishes WHERE id = ?", arrayOf(query.getInt("id")))
+                    if (dishQuery != null){
+
+                        while (dishQuery.next()){
+                            wrapper.dishes!![dishQuery.getInt("dish")] = dishQuery.getInt("amount")
+                        }
+                    }
+
+                    body.data = GsonBuilder().create().toJson(wrapper)
+                } else {
+                    body.data = ""
+                    body.type = 0
+                }
+
+                call.respond(body)
+                println("Response: $body")
+            } catch (ex: Exception){
+                ex.printStackTrace()
+            }
+        }
+
+
+
     }
 }

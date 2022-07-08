@@ -370,7 +370,29 @@ fun Application.configureSerialization() {
         }
 
         post("/deleteLayout"){
+            try {
+                val body = call.receive<NetPack>()
+                val layoutID = body.type
+                body.type = 1
 
+                if (!authUserAsAdmin(body.userToken)){
+                    body.type = -1
+                    println("Unauthorized request at '/deleteLayout' by user [${body.userToken}]")
+                    call.respond(body)
+                    return@post
+                }
+
+                val result = db.executeUpdate("DELETE FROM layouts WHERE id = ?", arrayOf(layoutID))
+                if (result == 1){
+                    body.type = 0
+                    body.data = "ERR_SUCCESS"
+                    println("User [${body.userToken}] successfully deleted layout with id [$layoutID]")
+                }
+
+                call.respond(body)
+            } catch (any: Exception){
+                any.printStackTrace()
+            }
         }
 
         post("/setUsername") {
